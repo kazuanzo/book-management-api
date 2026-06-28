@@ -1,0 +1,125 @@
+plugins {
+	id 'org.jetbrains.kotlin.jvm' version '2.2.20'
+	id 'org.jetbrains.kotlin.plugin.spring' version '2.2.20'
+	id 'org.springframework.boot' version '4.1.0'
+	id 'io.spring.dependency-management' version '1.1.7'
+	id 'org.jlleitschuh.gradle.ktlint' version '14.2.0'
+	id 'org.jooq.jooq-codegen-gradle' version '3.21.5'
+}
+
+group = 'com.example'
+version = '0.0.1-SNAPSHOT'
+
+java {
+	toolchain {
+		languageVersion = JavaLanguageVersion.of(21)
+	}
+}
+
+repositories {
+	mavenCentral()
+}
+
+dependencies {
+	implementation 'org.springframework.boot:spring-boot-starter-web'
+	implementation 'org.springframework.boot:spring-boot-starter-validation'
+	implementation 'org.springframework.boot:spring-boot-starter-flyway'
+	implementation 'org.springframework.boot:spring-boot-starter-jooq'
+	implementation 'org.flywaydb:flyway-database-postgresql'
+	implementation 'com.fasterxml.jackson.module:jackson-module-kotlin'
+	implementation 'org.jetbrains.kotlin:kotlin-reflect'
+	developmentOnly 'org.springframework.boot:spring-boot-docker-compose'
+	runtimeOnly 'org.postgresql:postgresql'
+	testImplementation 'org.springframework.boot:spring-boot-starter-test'
+	testImplementation 'org.jetbrains.kotlin:kotlin-test-junit5'
+	testRuntimeOnly 'org.junit.platform:junit-platform-launcher'
+
+	// jOOQ codegen 実行用クラスパス（DDLDatabaseでマイグレーションSQLから生成）
+	jooqCodegen 'org.jooq:jooq-codegen:3.21.5'
+	jooqCodegen 'org.jooq:jooq-meta-extensions:3.21.5'
+}
+
+kotlin {
+	compilerOptions {
+		freeCompilerArgs.addAll '-Xjsr305=strict', '-Xannotation-default-target=param-property'
+	}
+}
+
+ktlint {
+	version = '1.8.0'
+}
+
+// jOOQ: Flywayマイグレーションスクリプトをパースしてコード生成（DBへの接続不要）
+jooq {
+	configuration {
+		generator {
+			name = 'org.jooq.codegen.KotlinGenerator'
+			database {
+				name = 'org.jooq.meta.extensions.ddl.DDLDatabase'
+				properties {
+					property {
+						key = 'scripts'
+						value = 'src/main/resources/db/migration/*.sql'
+					}
+					property {
+						key = 'sort'
+						value = 'flyway'
+					}
+					property {
+						key = 'defaultNameCase'
+						value = 'lower'
+					}
+				}
+				// publication_status 列を domain の PublicationStatus enum に型バインド。
+				// DBはVARCHAR+CHECKのまま、Repositoryから .name/valueOf の手動変換を排除する。
+				forcedTypes {
+					forcedType {
+						userType = 'com.example.bookmanagement.domain.PublicationStatus'
+						enumConverter = true
+						includeExpression = '.*PUBLICATION_STATUS'
+					}
+				}
+			}
+			// DBのNOT NULL制約を根拠に、生成Recordのカラム属性を非null型にする。
+			// これでレコード→domain変換から !! を排除できる（POJOは未使用のためRecordのみ）。
+			generate {
+				kotlinNotNullRecordAttributes = true
+			}
+			target {
+				packageName = 'com.example.bookmanagement.jooq'
+				directory = "${layout.buildDirectory.get()}/generated-src/jooq/main"
+			}
+		}
+	}
+}
+
+// 生成コード(Kotlin)をmainソースセットに追加。
+// ktlintは src/main/kotlin に限定済みのため、生成コードはlint対象外のまま。
+sourceSets {
+	main {
+		kotlin {
+			srcDir layout.buildDirectory.dir('generated-src/jooq/main')
+		}
+	}
+}
+
+// コンパイル前にコード生成を完了させる
+tasks.named('compileKotlin') {
+	dependsOn 'jooqCodegen'
+}
+tasks.named('compileJava') {
+	dependsOn 'jooqCodegen'
+}
+
+// ktlintは手書きのKotlinソースのみを対象にする。
+// 生成コード(build/generated-src)をそもそも入力に含めないため、
+// lint対象外になり、jooqCodegenへの順番宣言（dependsOn）も不要になる。
+tasks.matching {
+	it.name in ['runKtlintCheckOverMainSourceSet', 'runKtlintFormatOverMainSourceSet']
+}.configureEach {
+	setSource(files('src/main/kotlin'))
+}
+
+tasks.named('test') {
+	useJUnitPlatform()
+}
